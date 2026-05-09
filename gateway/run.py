@@ -14361,6 +14361,19 @@ class GatewayRunner:
                             _loop_for_step,
                         ).result(timeout=15)
                         if _approval_result.success:
+                            # Register the approval bubble (the prompt + the
+                            # subsequent edit-in-place "✅ Approved …" ack) for
+                            # cleanup_progress deletion so the chat doesn't
+                            # accumulate "Approved permanently by …" lines
+                            # after every dangerous-command ask.  The message
+                            # is edited in place when resolved, so a single
+                            # message_id covers both states.
+                            try:
+                                _ap_mid = getattr(_approval_result, "message_id", None)
+                                if _cleanup_progress and _ap_mid:
+                                    _cleanup_msg_ids.append(str(_ap_mid))
+                            except Exception:
+                                pass
                             return
                         logger.warning(
                             "Button-based approval failed (send returned error), falling back to text: %s",

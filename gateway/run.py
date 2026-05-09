@@ -1148,6 +1148,26 @@ class GatewayRunner:
         self._pending_native_image_paths_by_session: Dict[str, List[str]] = {}
         self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
         self._session_run_generation: Dict[str, int] = {}
+        # Per-session message IDs that need to be cleaned at the start of
+        # the next turn for that session.  Used by ``cleanup_progress`` to
+        # delete the "⚠️ Gateway shutting down" notice across the gateway
+        # restart boundary — the cleanup path normally fires on final
+        # response delivery, which doesn't happen for an interrupted run.
+        # Loaded from disk on init so notices survive the restart and get
+        # removed when the user sends their next message.
+        self._cross_restart_cleanup_path = _hermes_home / ".cross_restart_cleanup.json"
+        self._cross_restart_cleanup: Dict[str, List[Dict[str, Any]]] = {}
+        try:
+            if self._cross_restart_cleanup_path.exists():
+                import json as _json
+                self._cross_restart_cleanup = _json.loads(
+                    self._cross_restart_cleanup_path.read_text(encoding="utf-8")
+                ) or {}
+                if not isinstance(self._cross_restart_cleanup, dict):
+                    self._cross_restart_cleanup = {}
+        except Exception as _e:
+            logger.debug("Failed to load cross-restart cleanup file: %s", _e)
+            self._cross_restart_cleanup = {}
         # LRU cache of live SessionSources keyed by session_key. Used by
         # fallback routing paths (shutdown notifications, synthetic
         # background-process events) when the persisted origin is missing
@@ -2720,6 +2740,21 @@ class GatewayRunner:
                     )
                     continue
 
+                # Register the notice for cleanup_progress on the next turn.
+                # The agent was interrupted, so the normal end-of-turn cleanup
+                # didn't fire — persist the id and drain it when the user
+                # comes back and starts a fresh turn for this session.
+                try:
+                    _mid = getattr(result, "message_id", None) if result is not None else None
+                    if _mid:
+                        self._cross_restart_cleanup.setdefault(session_key, []).append({
+                            "chat_id": str(chat_id),
+                            "message_id": str(_mid),
+                            "platform": platform_str,
+                        })
+                except Exception as _reg_err:
+                    logger.debug("shutdown-notice cleanup registration failed: %s", _reg_err)
+
                 notified.add(dedup_key)
                 logger.info(
                     "Sent shutdown notification to active chat %s:%s",
@@ -2781,6 +2816,18 @@ class GatewayRunner:
                     home.chat_id,
                     e,
                 )
+
+        # Persist the cross-restart cleanup ledger so notice IDs survive the
+        # gateway-restart boundary.  Drained on next inbound message for the
+        # session — see _handle_message_with_agent.
+        try:
+            import json as _json
+            self._cross_restart_cleanup_path.write_text(
+                _json.dumps(self._cross_restart_cleanup),
+                encoding="utf-8",
+            )
+        except Exception as _wp:
+            logger.debug("Failed to persist cross-restart cleanup file: %s", _wp)
 
     def _finalize_shutdown_agents(self, active_agents: Dict[str, Any]) -> None:
         for agent in active_agents.values():
@@ -13510,6 +13557,29 @@ class GatewayRunner:
             _cleanup_progress = False
             _cleanup_adapter = None
         _cleanup_msg_ids: List[str] = []
+        # Drain any cross-restart shutdown notices for this session so they
+        # get cleaned with this turn's other temporary bubbles.  No-op when
+        # cleanup_progress is disabled or the session has no pending IDs.
+        if _cleanup_progress and session_key:
+            try:
+                _persisted = self._cross_restart_cleanup.pop(session_key, [])
+                for _entry in _persisted:
+                    _mid = _entry.get("message_id") if isinstance(_entry, dict) else None
+                    if _mid:
+                        _cleanup_msg_ids.append(str(_mid))
+                if _persisted:
+                    # Persist the trimmed ledger so the same id isn't
+                    # re-deleted in a later turn.
+                    try:
+                        import json as _json
+                        self._cross_restart_cleanup_path.write_text(
+                            _json.dumps(self._cross_restart_cleanup),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        pass
+            except Exception as _pe:
+                logger.debug("cross-restart cleanup drain failed: %s", _pe)
         # First-touch onboarding latch: fires at most once per run, even if
         # several tools exceed the threshold.
         long_tool_hint_fired = [False]

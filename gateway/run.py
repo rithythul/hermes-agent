@@ -2388,7 +2388,9 @@ class GatewayRunner:
         adapter = self.adapters.get(event.source.platform)
         if not adapter:
             return
-        merge_pending_message_event(adapter._pending_messages, session_key, event)
+        merge_pending_message_event(
+            adapter._pending_messages, session_key, event, merge_text=True
+        )
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
@@ -2470,8 +2472,14 @@ class GatewayRunner:
         # current run finishes (or is interrupted).  Skip this for a
         # successful steer — the text already landed inside the run and
         # must NOT also be replayed as a next-turn user message.
+        # ``merge_text=True`` matches the rapid-follow-up path in
+        # _handle_message (5620/5640) so two text messages queued during
+        # the same busy turn append instead of the later one clobbering
+        # the earlier — preserves user intent in queue mode.
         if not steered:
-            merge_pending_message_event(adapter._pending_messages, session_key, event)
+            merge_pending_message_event(
+                adapter._pending_messages, session_key, event, merge_text=True
+            )
 
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"

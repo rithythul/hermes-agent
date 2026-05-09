@@ -14236,6 +14236,13 @@ class GatewayRunner:
                             def _commentary_to_queue(_text: str) -> None:
                                 progress_queue.put(f"💭 _{_text}_")
                             _stream_consumer.set_commentary_redirect(_commentary_to_queue)
+                        # Also coalesce model reply text across tool boundaries
+                        # so the chat ends with one growing text bubble instead
+                        # of N stranded segments. The transient out-of-order
+                        # appearance during the run is invisible by end-of-turn
+                        # since cleanup_progress deletes tool/commentary bubbles.
+                        if _cleanup_progress:
+                            _stream_consumer.set_coalesce_segments(True)
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)

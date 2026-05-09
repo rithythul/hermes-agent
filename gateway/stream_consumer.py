@@ -128,6 +128,14 @@ class GatewayStreamConsumer:
         # Falls back to the normal adapter.send path on exception or when
         # unset.
         self._commentary_redirect: Optional[Callable[[str], None]] = None
+        # When True, segment breaks (tool boundaries) DO NOT close the
+        # current message — text keeps editing the same bubble across the
+        # whole turn. The gateway sets this under ``cleanup_progress`` so
+        # the model's reply lands in one growing bubble instead of N
+        # separate bubbles between tool calls. Tool/commentary bubbles
+        # still appear below it during the run, but cleanup_progress
+        # deletes them at end-of-turn, leaving just the text bubble.
+        self._coalesce_segments: bool = False
         self._edit_supported = True  # Disabled when progressive edits are no longer usable
         self._last_edit_time = 0.0
         self._last_sent_text = ""   # Track last-sent text to skip redundant edits
@@ -179,8 +187,31 @@ class GatewayStreamConsumer:
         """
         self._commentary_redirect = redirect
 
+    def set_coalesce_segments(self, enabled: bool) -> None:
+        """Toggle single-bubble mode for the model's reply text.
+
+        When enabled, ``on_segment_break`` becomes a no-op: tool boundaries
+        no longer finalize the current bubble, so all model text across
+        the turn keeps editing one message. Used by the gateway under
+        ``cleanup_progress`` mode where tool/commentary bubbles get
+        deleted at end-of-turn anyway.
+        """
+        self._coalesce_segments = bool(enabled)
+
     def on_segment_break(self) -> None:
-        """Finalize the current stream segment and start a fresh message."""
+        """Finalize the current stream segment and start a fresh message.
+
+        No-op under :pymeth:`set_coalesce_segments` — but in that mode we
+        push a blank-line separator into the stream so consecutive text
+        segments don't run together visually inside the shared bubble.
+        """
+        if self._coalesce_segments:
+            # Insert a paragraph break so text emitted before/after a tool
+            # call has visible separation when it lands in the same bubble.
+            # Goes through _filter_and_accumulate like any other delta.
+            if self._accumulated and not self._accumulated.endswith("\n\n"):
+                self._queue.put("\n\n")
+            return
         self._queue.put(_NEW_SEGMENT)
 
     def on_commentary(self, text: str) -> None:

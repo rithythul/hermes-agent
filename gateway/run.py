@@ -13718,6 +13718,16 @@ class GatewayRunner:
                         # order. Mirrors GatewayStreamConsumer.on_segment_break
                         # on the content side. (Issue: tool + content
                         # linearization regression after PR #7885.)
+                        #
+                        # Skip the reset when ``cleanup_progress`` is on: every
+                        # progress / commentary / status line will be deleted
+                        # at end-of-turn anyway, so out-of-order linearization
+                        # is invisible to the user.  Keeping a single growing
+                        # bubble is the cleaner UX in this mode — one chat
+                        # entry that updates in place instead of N stranded
+                        # bubbles between content streams.
+                        if _cleanup_progress:
+                            continue
                         progress_msg_id = None
                         progress_lines = []
                         last_progress_msg[0] = None
@@ -14064,6 +14074,15 @@ class GatewayRunner:
                             def _stream_delta_cb(text: str) -> None:
                                 if _run_still_current():
                                     _stream_consumer.on_delta(text)
+                        # cleanup_progress + single-bubble: route commentary
+                        # into the tool-progress queue so commentary lands in
+                        # the same bubble that gets deleted at end of turn.
+                        # The italics + 💭 prefix keeps commentary visually
+                        # distinct from tool lines while sharing the bubble.
+                        if _cleanup_progress and progress_queue is not None:
+                            def _commentary_to_queue(_text: str) -> None:
+                                progress_queue.put(f"💭 _{_text}_")
+                            _stream_consumer.set_commentary_redirect(_commentary_to_queue)
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
@@ -15287,6 +15306,17 @@ class GatewayRunner:
                     _previewed,
                 )
                 response["already_sent"] = True
+
+        # Pull in commentary bubble IDs from the stream consumer so they get
+        # deleted alongside tool progress / "Still working..." / status calls.
+        # Without this, mid-tool-loop commentary like "DuckDuckGo blocked,
+        # trying Wikipedia." persists past cleanup_progress and clutters the
+        # chat after the final response lands.
+        if _cleanup_progress and _sc is not None:
+            try:
+                _cleanup_msg_ids.extend(_sc.commentary_message_ids)
+            except Exception as _ce:
+                logger.debug("commentary id capture failed: %s", _ce)
 
         # Schedule deletion of tracked temporary progress bubbles after the
         # final response lands. Failed runs skip this so bubbles remain as

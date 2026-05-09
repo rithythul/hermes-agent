@@ -13159,6 +13159,30 @@ class GatewayRunner:
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
+        # ── Daimon tier-based overrides (Discord) ─────────────────────────
+        _daimon_overrides = None
+        try:
+            from gateway.daimon.gateway_hooks import get_agent_overrides, apply_overrides, setup_tool_gate, teardown_tool_gate, redact_output
+            _daimon_overrides = get_agent_overrides(user_config, source.user_id, platform_key)
+            if _daimon_overrides:
+                _applied = apply_overrides(
+                    _daimon_overrides,
+                    model=model,
+                    max_iterations=max_iterations,
+                    disabled_toolsets=disabled_toolsets,
+                )
+                model = _applied["model"]
+                max_iterations = _applied["max_iterations"]
+                disabled_toolsets = _applied["disabled_toolsets"]
+                if _applied.get("ephemeral_system_prompt"):
+                    combined_ephemeral = _applied["ephemeral_system_prompt"]
+                if not _daimon_overrides.tier.is_admin:
+                    setup_tool_gate(session_id, user_config)
+        except ImportError:
+            pass  # gateway.daimon not available — skip
+        except Exception as _daimon_err:
+            logger.debug("Daimon override error (non-fatal): %s", _daimon_err)
+
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):
             display_config = {}
@@ -14224,6 +14248,12 @@ class GatewayRunner:
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
+                # ── Daimon tool gate cleanup ──
+                if _daimon_overrides and not _daimon_overrides.tier.is_admin:
+                    try:
+                        teardown_tool_gate(session_id)
+                    except Exception:
+                        pass
             result_holder[0] = result
 
             # Signal the stream consumer that the agent is done
@@ -14232,6 +14262,13 @@ class GatewayRunner:
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
+
+            # ── Daimon output redaction (user sessions only) ──
+            if final_response and _daimon_overrides and not _daimon_overrides.tier.is_admin:
+                try:
+                    final_response = redact_output(final_response)
+                except Exception:
+                    pass
 
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0

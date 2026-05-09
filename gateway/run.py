@@ -11912,10 +11912,14 @@ class GatewayRunner:
                     remaining = remaining[available:]
                     new_text = _active_msg_text + chunk
                     try:
+                        # ``finalize=True`` so the adapter applies Markdown
+                        # formatting and the triple-backtick code block
+                        # renders monospace instead of literal backticks.
                         res = await adapter.edit_message(
                             chat_id=chat_id,
                             message_id=_active_msg_id,
                             content=f"```\n{new_text}\n```",
+                            finalize=True,
                         )
                         if getattr(res, "success", False):
                             _active_msg_text = new_text
@@ -14974,11 +14978,23 @@ class GatewayRunner:
                         _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
-                _text = f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})"
+                # Wrap the status text in inline-code backticks so it renders
+                # in monospace on platforms that honour Markdown — visually
+                # marks the heartbeat as a system status line, distinct from
+                # the model's natural reply. Mirrors the cleanup_progress
+                # tool-progress formatting convention. Backticks inside the
+                # detail would close the span, so swap them for single quotes.
+                _safe_detail = _status_detail.replace("`", "'")
+                _text = (
+                    f"⏳ `Still working... ({_elapsed_mins} min elapsed"
+                    f"{_safe_detail})`"
+                )
                 # Edit the existing bubble in place so progress updates collapse
                 # into one message instead of spamming the chat. Fall back to
                 # sending a new message if edit fails (message deleted, adapter
-                # missing edit_message, etc.).
+                # missing edit_message, etc.). ``finalize=True`` makes the
+                # adapter apply Markdown formatting on the edited content
+                # (the default edit path sends plain text).
                 _existing_id = _notify_msg_id_holder[0]
                 if _existing_id and hasattr(_notify_adapter, "edit_message"):
                     try:
@@ -14986,6 +15002,7 @@ class GatewayRunner:
                             source.chat_id,
                             _existing_id,
                             _text,
+                            finalize=True,
                         )
                         if getattr(_edit_res, "success", False):
                             continue

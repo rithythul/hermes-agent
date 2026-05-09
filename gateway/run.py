@@ -14884,6 +14884,7 @@ class GatewayRunner:
         _NOTIFY_INTERVAL_RAW = _float_env("HERMES_AGENT_NOTIFY_INTERVAL", 180)
         _NOTIFY_INTERVAL = _NOTIFY_INTERVAL_RAW if _NOTIFY_INTERVAL_RAW > 0 else None
         _notify_start = time.time()
+        _notify_msg_id_holder: list[Optional[str]] = [None]
 
         async def _notify_long_running():
             if _NOTIFY_INTERVAL is None:
@@ -14908,18 +14909,36 @@ class GatewayRunner:
                         _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
+                _text = f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})"
+                # Edit the existing bubble in place so progress updates collapse
+                # into one message instead of spamming the chat. Fall back to
+                # sending a new message if edit fails (message deleted, adapter
+                # missing edit_message, etc.).
+                _existing_id = _notify_msg_id_holder[0]
+                if _existing_id and hasattr(_notify_adapter, "edit_message"):
+                    try:
+                        _edit_res = await _notify_adapter.edit_message(
+                            source.chat_id,
+                            _existing_id,
+                            _text,
+                        )
+                        if getattr(_edit_res, "success", False):
+                            continue
+                    except Exception as _ee:
+                        logger.debug("Long-running edit error, falling back to send: %s", _ee)
                 try:
                     _notify_res = await _notify_adapter.send(
                         source.chat_id,
-                        f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})",
+                        _text,
                         metadata=_status_thread_metadata,
                     )
                     if (
-                        _cleanup_progress
-                        and getattr(_notify_res, "success", False)
+                        getattr(_notify_res, "success", False)
                         and getattr(_notify_res, "message_id", None)
                     ):
-                        _cleanup_msg_ids.append(str(_notify_res.message_id))
+                        _notify_msg_id_holder[0] = str(_notify_res.message_id)
+                        if _cleanup_progress:
+                            _cleanup_msg_ids.append(str(_notify_res.message_id))
                 except Exception as _ne:
                     logger.debug("Long-running notification error: %s", _ne)
 

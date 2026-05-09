@@ -11844,10 +11844,22 @@ class GatewayRunner:
         bytes_sent = 0
         last_stream_time = loop.time()
         buffer = ""
+        # Stream the running update log into a single rolling bubble that we
+        # edit in place, instead of sending a new message per flush. When the
+        # bubble fills up (~3500 chars) we close it off and start a fresh one
+        # for the overflow. Adapters without real edit support fall back to
+        # the original chunk-and-send behavior.
+        _MAX_CHUNK = 3500
+        _active_msg_id: Optional[str] = None
+        _active_msg_text = ""
+        _can_edit_stream = (
+            hasattr(adapter, "edit_message")
+            and type(adapter).edit_message is not BasePlatformAdapter.edit_message
+        )
 
         async def _flush_buffer() -> None:
             """Send buffered output to the user."""
-            nonlocal buffer, last_stream_time
+            nonlocal buffer, last_stream_time, _active_msg_id, _active_msg_text
             if not buffer.strip():
                 buffer = ""
                 return
@@ -11857,14 +11869,67 @@ class GatewayRunner:
             last_stream_time = loop.time()
             if not clean:
                 return
-            # Split into chunks if too long
-            max_chunk = 3500
-            chunks = [clean[i:i + max_chunk] for i in range(0, len(clean), max_chunk)]
-            for chunk in chunks:
-                try:
-                    await adapter.send(chat_id, f"```\n{chunk}\n```", metadata=metadata)
-                except Exception as e:
-                    logger.debug("Update stream send failed: %s", e)
+
+            if not _can_edit_stream:
+                # Adapter can't edit messages — fall back to one bubble per flush.
+                for i in range(0, len(clean), _MAX_CHUNK):
+                    try:
+                        await adapter.send(
+                            chat_id,
+                            f"```\n{clean[i:i + _MAX_CHUNK]}\n```",
+                            metadata=metadata,
+                        )
+                    except Exception as e:
+                        logger.debug("Update stream send failed: %s", e)
+                return
+
+            remaining = clean
+            while remaining:
+                if _active_msg_id is None:
+                    chunk = remaining[:_MAX_CHUNK]
+                    remaining = remaining[_MAX_CHUNK:]
+                    try:
+                        res = await adapter.send(
+                            chat_id, f"```\n{chunk}\n```", metadata=metadata,
+                        )
+                        if (getattr(res, "success", False)
+                                and getattr(res, "message_id", None)):
+                            _active_msg_id = str(res.message_id)
+                            _active_msg_text = chunk
+                        else:
+                            return  # send failed; drop the rest of this flush
+                    except Exception as e:
+                        logger.debug("Update stream send failed: %s", e)
+                        return
+                else:
+                    available = _MAX_CHUNK - len(_active_msg_text)
+                    if available <= 0:
+                        # Current bubble is full — start a fresh one for overflow.
+                        _active_msg_id = None
+                        _active_msg_text = ""
+                        continue
+                    chunk = remaining[:available]
+                    remaining = remaining[available:]
+                    new_text = _active_msg_text + chunk
+                    try:
+                        res = await adapter.edit_message(
+                            chat_id=chat_id,
+                            message_id=_active_msg_id,
+                            content=f"```\n{new_text}\n```",
+                        )
+                        if getattr(res, "success", False):
+                            _active_msg_text = new_text
+                        else:
+                            # Edit failed (msg deleted, flood control, etc.) —
+                            # close this bubble and retry the chunk in a new one.
+                            _active_msg_id = None
+                            _active_msg_text = ""
+                            remaining = chunk + remaining
+                    except Exception as e:
+                        logger.debug("Update stream edit failed: %s", e)
+                        _active_msg_id = None
+                        _active_msg_text = ""
+                        remaining = chunk + remaining
 
         while loop.time() < deadline:
             # Check for completion

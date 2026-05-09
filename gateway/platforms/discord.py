@@ -566,6 +566,10 @@ class DiscordAdapter(BasePlatformAdapter):
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._slash_commands: bool = self.config.extra.get("slash_commands", True)
 
+        # ── Daimon access control ──
+        self._daimon = None  # Initialized in connect() after config is loaded
+        self._daimon_banned: set = set()
+
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
         if not DISCORD_AVAILABLE:
@@ -620,6 +624,23 @@ class DiscordAdapter(BasePlatformAdapter):
                     int(rid.strip()) for rid in roles_env.split(",")
                     if rid.strip().isdigit()
                 }
+
+            # ── Daimon session manager ──
+            try:
+                from gateway.daimon.discord_hooks import DaimonDiscordHooks
+                _gw_cfg = {}
+                try:
+                    from gateway.run import _load_gateway_config
+                    _gw_cfg = _load_gateway_config()
+                except Exception:
+                    pass
+                self._daimon = DaimonDiscordHooks(_gw_cfg)
+                if self._daimon.active:
+                    logger.info("[Discord] Daimon active: access control enabled")
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.debug("[Discord] Daimon init skipped: %s", e)
 
             # Set up intents.
             # Message Content is required for normal text replies.
@@ -680,6 +701,15 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Resolve any usernames in the allowed list to numeric IDs
                 await adapter_self._resolve_allowed_usernames()
                 adapter_self._ready_event.set()
+
+                # Recover Daimon thread ownership from Discord API
+                if adapter_self._daimon and adapter_self._daimon.active:
+                    try:
+                        _recovered = await adapter_self._daimon.recover_thread_ownership(adapter_self._client)
+                        if _recovered:
+                            logger.info("[Discord] Daimon: recovered %d thread ownerships", _recovered)
+                    except Exception as e:
+                        logger.debug("[Discord] Daimon thread recovery failed: %s", e)
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
@@ -4056,6 +4086,14 @@ class DiscordAdapter(BasePlatformAdapter):
             thread_id = str(message.channel.id)
             parent_channel_id = self._get_parent_channel_id(message.channel)
 
+        # ── Daimon: thread-creator filter + ban check ──
+        if self._daimon and self._daimon.active:
+            if self._daimon.is_banned(str(message.author.id)):
+                return
+            if is_thread and thread_id:
+                if not self._daimon.should_process_in_thread(str(message.author.id), thread_id):
+                    return
+
         is_voice_linked_channel = False
 
         # Save mention-stripped text before auto-threading since create_thread()
@@ -4130,6 +4168,11 @@ class DiscordAdapter(BasePlatformAdapter):
                     thread_id = str(thread.id)
                     auto_threaded_channel = thread
                     self._threads.mark(thread_id)
+                    # Register Daimon thread ownership
+                    if self._daimon and self._daimon.active:
+                        self._daimon.on_thread_created(
+                            thread_id, str(message.author.id), {}
+                        )
 
         # Determine message type
         msg_type = MessageType.TEXT

@@ -113,3 +113,35 @@ class DaimonDiscordHooks:
         if not self._manager:
             return text
         return self._manager.redact(text)
+
+    async def recover_thread_ownership(self, client) -> int:
+        """Recover thread ownership from Discord API on gateway restart.
+
+        Queries all active threads the bot is in, registers their creators.
+        Called once after Discord connect.
+
+        Args:
+            client: The discord.py Client/Bot instance
+
+        Returns:
+            Number of threads recovered.
+        """
+        if not self._manager:
+            return 0
+
+        recovered = 0
+        try:
+            for guild in client.guilds:
+                # Fetch active threads in this guild
+                threads = await guild.fetch_active_threads() if hasattr(guild, 'fetch_active_threads') else None
+                if not threads:
+                    continue
+                for thread in (threads.threads if hasattr(threads, 'threads') else threads):
+                    owner_id = str(thread.owner_id) if thread.owner_id else None
+                    if owner_id:
+                        self._manager._threads.register(str(thread.id), owner_id)
+                        recovered += 1
+        except Exception as e:
+            logger.debug("Thread recovery error: %s", e)
+
+        return recovered

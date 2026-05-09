@@ -1,0 +1,46 @@
+services:
+  daimon-sandbox:
+    build: .
+    container_name: daimon-sandbox
+    restart: unless-stopped
+
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID    # gosu privilege drop in entrypoint
+      - SETGID    # gosu privilege drop in entrypoint
+      - CHOWN     # entrypoint file ownership
+      - FOWNER    # entrypoint chmod
+
+    # Resources
+    mem_limit: 8g
+    cpus: "2.0"
+
+    # Network (custom bridge, private nets blocked via iptables)
+    networks:
+      - daimon-net
+
+    # Secrets (GH token file)
+    secrets:
+      - gh_token
+
+    # Volumes — persist the shared hermes-agent clone + venv across restarts
+    # Read-only for the agent user (systemd timer does git pull as root via docker exec)
+    volumes:
+      - hermes-repo:/opt/hermes-agent:ro
+
+secrets:
+  gh_token:
+    file: ./secrets/gh_token.txt
+
+volumes:
+  hermes-repo:
+
+networks:
+  daimon-net:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "true"
